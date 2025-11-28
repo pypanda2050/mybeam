@@ -25,16 +25,18 @@ public class GcsProcessingPipelineTest {
         // 1698400800000 corresponds to 2023-10-27T10:00:00Z
         File inputFile1 = tmpFolder.newFile("1698400800000.csv");
         List<String> lines1 = Arrays.asList(
-                "saga1,nodeA,1698400800000",
-                "saga2,nodeA,1698400800000"
+                "saga1,nodeA,1698400800000,R",
+                "saga2,nodeA,1698400800000,C",
+                "saga3,nodeA,1698400800000,R"
         );
         Files.write(inputFile1.toPath(), lines1);
 
-        // Another file in the same hour (if we had one) or different hour
+        // Another file
         // 1698404400000 corresponds to 2023-10-27T11:00:00Z
         File inputFile2 = tmpFolder.newFile("1698404400000.csv");
         List<String> lines2 = Arrays.asList(
-                "saga3,nodeB,1698404400000"
+                "saga4,nodeB,1698404400000,D",
+                "saga5,nodeB,1698404400000,D"
         );
         Files.write(inputFile2.toPath(), lines2);
 
@@ -42,7 +44,6 @@ public class GcsProcessingPipelineTest {
         File outputDir = tmpFolder.newFolder("output");
 
         // 3. Run Pipeline
-        // We use a glob pattern to match the files
         String inputPattern = tmpFolder.getRoot().getAbsolutePath() + "/*.csv";
         
         String[] args = {
@@ -52,20 +53,41 @@ public class GcsProcessingPipelineTest {
         GcsProcessingPipeline.main(args);
 
         // 4. Verify Output
-        // Expected structure:
-        // output/nodeA/2023-10-27-10/part-...
-        // output/nodeB/2023-10-27-11/part-...
-
-        File nodeADir = new File(outputDir, "nodeA");
-        File nodeBDir = new File(outputDir, "nodeB");
-
-        if (!nodeADir.exists()) {
-            throw new RuntimeException("Output directory for nodeA not created.");
+        // Check dynamic write output
+        File nodeARDir = new File(outputDir, "nodeA_R_2023-10-27-10");
+        if (!nodeARDir.exists()) {
+            throw new RuntimeException("Output directory for nodeA_R not created.");
         }
-        if (!nodeBDir.exists()) {
-            throw new RuntimeException("Output directory for nodeB not created.");
+
+        // Check summary output
+        File summaryDir = new File(outputDir, "summary_count");
+        if (!summaryDir.exists()) {
+            throw new RuntimeException("Summary directory not created.");
         }
         
-        System.out.println("Test passed: Output directories created.");
+        // Find summary file
+        File[] summaryFiles = summaryDir.listFiles((dir, name) -> name.startsWith("summary") && name.endsWith(".csv"));
+        if (summaryFiles == null || summaryFiles.length == 0) {
+            throw new RuntimeException("Summary file not found.");
+        }
+        
+        // Read summary content
+        // Expected:
+        // nodeA, 2, 1, 0
+        // nodeB, 0, 0, 2
+        
+        List<String> summaryLines = Files.readAllLines(summaryFiles[0].toPath());
+        boolean foundNodeA = false;
+        boolean foundNodeB = false;
+        
+        for (String line : summaryLines) {
+            if (line.contains("nodeA,2,1,0")) foundNodeA = true;
+            if (line.contains("nodeB,0,0,2")) foundNodeB = true;
+        }
+        
+        if (!foundNodeA) throw new RuntimeException("Summary for nodeA incorrect or missing: " + summaryLines);
+        if (!foundNodeB) throw new RuntimeException("Summary for nodeB incorrect or missing: " + summaryLines);
+        
+        System.out.println("Test passed: Output directories and summary created.");
     }
 }

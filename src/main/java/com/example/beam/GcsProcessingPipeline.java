@@ -21,13 +21,13 @@ import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.io.Serializable;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Objects;
 
 public class GcsProcessingPipeline {
 
@@ -45,9 +45,79 @@ public class GcsProcessingPipeline {
         void setOutput(String value);
     }
 
+    public static class OutputKey implements Serializable {
+        private String nodeId;
+        private String recordType;
+        private String hour;
+
+        public OutputKey() {}
+
+        public OutputKey(String nodeId, String recordType, String hour) {
+            this.nodeId = nodeId;
+            this.recordType = recordType;
+            this.hour = hour;
+        }
+
+        public String getNodeId() { return nodeId; }
+        public String getRecordType() { return recordType; }
+        public String getHour() { return hour; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            OutputKey outputKey = (OutputKey) o;
+            return Objects.equals(nodeId, outputKey.nodeId) &&
+                   Objects.equals(recordType, outputKey.recordType) &&
+                   Objects.equals(hour, outputKey.hour);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(nodeId, recordType, hour);
+        }
+
+        @Override
+        public String toString() {
+            return "OutputKey{nodeId='" + nodeId + "', recordType='" + recordType + "', hour='" + hour + "'}";
+        }
+    }
+
+    public static class OutputKeyCoder extends org.apache.beam.sdk.coders.AtomicCoder<OutputKey> {
+        private static final OutputKeyCoder INSTANCE = new OutputKeyCoder();
+        private static final org.apache.beam.sdk.coders.StringUtf8Coder STRING_CODER = org.apache.beam.sdk.coders.StringUtf8Coder.of();
+
+        public static OutputKeyCoder of() {
+            return INSTANCE;
+        }
+
+        @Override
+        public void encode(OutputKey value, java.io.OutputStream outStream) throws java.io.IOException {
+            STRING_CODER.encode(value.nodeId, outStream);
+            STRING_CODER.encode(value.recordType, outStream);
+            STRING_CODER.encode(value.hour, outStream);
+        }
+
+        @Override
+        public OutputKey decode(java.io.InputStream inStream) throws java.io.IOException {
+            String nodeId = STRING_CODER.decode(inStream);
+            String recordType = STRING_CODER.decode(inStream);
+            String hour = STRING_CODER.decode(inStream);
+            return new OutputKey(nodeId, recordType, hour);
+        }
+
+        @Override
+        public void verifyDeterministic() {
+            // StringUtf8Coder is deterministic
+        }
+    }
+
     public static void main(String[] args) {
         GcsOptions options = PipelineOptionsFactory.fromArgs(args).withValidation().as(GcsOptions.class);
         Pipeline p = Pipeline.create(options);
+        
+        // Register Coder
+        p.getCoderRegistry().registerCoderForClass(OutputKey.class, OutputKeyCoder.of());
 
         // 1. Match files
         PCollection<Metadata> matches = p.apply("MatchFiles", FileIO.match().filepattern(options.getInput()));
@@ -61,8 +131,6 @@ public class GcsProcessingPipeline {
                     ResourceId resourceId = metadata.resourceId();
                     String filename = resourceId.getFilename();
                     
-                    // Filename is start_time_in_millis (possibly with extension)
-                    // Remove extension if present
                     if (filename.contains(".")) {
                         filename = filename.substring(0, filename.lastIndexOf('.'));
                     }
@@ -85,10 +153,9 @@ public class GcsProcessingPipeline {
             .apply("GroupByHour", GroupByKey.create());
 
         // 3. Read and Process Files in Group
-        PCollection<KV<String, String>> parsedRecords = groupedFiles.apply("ProcessGroups", ParDo.of(new DoFn<KV<String, Iterable<Metadata>>, KV<String, String>>() {
+        PCollection<KV<OutputKey, String>> parsedRecords = groupedFiles.apply("ProcessGroups", ParDo.of(new DoFn<KV<String, Iterable<Metadata>>, KV<OutputKey, String>>() {
             @ProcessElement
             public void processElement(ProcessContext c) {
-                String hourKey = c.element().getKey();
                 Iterable<Metadata> files = c.element().getValue();
 
                 for (Metadata metadata : files) {
@@ -101,26 +168,18 @@ public class GcsProcessingPipeline {
                                 continue;
                             }
 
-                            // Assuming CSV: saga_id, node_id, create_ts
+                            // Assuming CSV: saga_id, node_id, create_ts, record_type
                             String[] parts = line.split(",");
-                            if (parts.length < 3) {
-                                LOG.warn("Skipping malformed line: " + line);
+                            if (parts.length < 4) {
+                                LOG.warn("Skipping malformed line (missing record_type): " + line);
                                 continue;
                             }
 
                             String sagaId = parts[0].trim();
                             String nodeId = parts[1].trim();
                             String createTs = parts[2].trim();
+                            String recordType = parts[3].trim();
 
-                            // We still need to parse createTs for the output key (node_id + hour)
-                            // Even though we grouped files by hour, the record's create_ts might differ slightly?
-                            // Or we strictly use the file's hour? 
-                            // The requirement says: "keyed by node id and hour"
-                            // And "read all files from GCS in same hour in same group".
-                            // It's safer to use the record's own timestamp for the output key to be precise,
-                            // or if the file implies the hour for all records, we could use 'hourKey'.
-                            // Let's stick to parsing the record's createTs as per previous logic to be safe.
-                            
                             String recordHour = "unknown";
                             try {
                                 long epochMillis = Long.parseLong(createTs);
@@ -133,7 +192,7 @@ public class GcsProcessingPipeline {
                                 recordHour = "invalid_ts";
                             }
 
-                            String key = nodeId + "/" + recordHour;
+                            OutputKey key = new OutputKey(nodeId, recordType, recordHour);
                             String value = sagaId + "," + createTs;
                             
                             c.output(KV.of(key, value));
@@ -146,13 +205,68 @@ public class GcsProcessingPipeline {
         }));
 
         // 4. Write Dynamic
-        parsedRecords.apply("WriteDynamic", FileIO.<String, KV<String, String>>writeDynamic()
+        parsedRecords.apply("WriteDynamic", FileIO.<OutputKey, KV<OutputKey, String>>writeDynamic()
                 .by(KV::getKey)
                 .via(Contextful.fn(KV::getValue), TextIO.sink())
                 .to(options.getOutput())
-                .withNaming(key -> FileIO.Write.defaultNaming(key + "/part", ".csv"))
-                .withDestinationCoder(org.apache.beam.sdk.coders.StringUtf8Coder.of())
+                .withNaming(key -> FileIO.Write.defaultNaming(
+                        key.getNodeId() + "_" + key.getRecordType() + "_" + key.getHour() + "/part", 
+                        ".csv"))
+                .withDestinationCoder(OutputKeyCoder.of())
                 .withNumShards(1));
+
+        // 5. Aggregation Pipeline
+        // Branch from parsedRecords to calculate summary counts
+        parsedRecords
+            .apply("CountPerKey", org.apache.beam.sdk.transforms.Count.perKey())
+            .apply("PivotForSummary", ParDo.of(new DoFn<KV<OutputKey, Long>, KV<String, KV<String, Long>>>() {
+                @ProcessElement
+                public void processElement(ProcessContext c) {
+                    OutputKey key = c.element().getKey();
+                    Long count = c.element().getValue();
+                    
+                    // Grouping key: nodeId + "_" + hour
+                    String groupKey = key.getNodeId() + "_" + key.getHour();
+                    // Value: recordType, count
+                    c.output(KV.of(groupKey, KV.of(key.getRecordType(), count)));
+                }
+            }))
+            .apply("GroupSummary", GroupByKey.create())
+            .apply("FormatSummary", ParDo.of(new DoFn<KV<String, Iterable<KV<String, Long>>>, String>() {
+                @ProcessElement
+                public void processElement(ProcessContext c) {
+                    String groupKey = c.element().getKey(); // nodeId_hour
+                    Iterable<KV<String, Long>> counts = c.element().getValue();
+                    
+                    long countR = 0;
+                    long countC = 0;
+                    long countD = 0;
+                    
+                    for (KV<String, Long> item : counts) {
+                        String type = item.getKey();
+                        Long val = item.getValue();
+                        if ("R".equals(type)) countR += val;
+                        else if ("C".equals(type)) countC += val;
+                        else if ("D".equals(type)) countD += val;
+                    }
+                    
+                    // Parse nodeId from groupKey (nodeId_hour)
+                    // Assuming nodeId doesn't contain "_", but hour is yyyy-MM-dd-HH (contains -)
+                    // Let's just use the groupKey or try to split.
+                    // groupKey = nodeId + "_" + hour
+                    // If we want just nodeId in the CSV as per requirement "node_id, count(R)..."
+                    // We need to extract it.
+                    String nodeId = groupKey.substring(0, groupKey.lastIndexOf('_'));
+                    
+                    // Output: node_id, countR, countC, countD
+                    String csv = nodeId + "," + countR + "," + countC + "," + countD;
+                    c.output(csv);
+                }
+            }))
+            .apply("WriteSummary", TextIO.write()
+                    .to(options.getOutput() + "/summary_count/summary")
+                    .withSuffix(".csv")
+                    .withoutSharding());
 
         p.run();
     }
