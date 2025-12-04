@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  gcs-emulator:
+    build: .
+    image: fsouza/fake-gcs-server
+    container_name: fake-gcs-server
+    ports:
+      - "4443:4443"
+    volumes:
+      - ./gcs-data:/data
+    command: -scheme http
