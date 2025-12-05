@@ -10,3 +10,13 @@ services:
     volumes:
       - ./gcs-data:/data
     command: -scheme http
+
+  postgres:
+    image: postgres:13
+    container_name: postgres-test
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: testdb
+    ports:
+      - "5432:5432"
