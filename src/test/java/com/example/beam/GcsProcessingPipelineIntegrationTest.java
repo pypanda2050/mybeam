@@ -40,7 +40,7 @@ public class GcsProcessingPipelineIntegrationTest {
     com.google.cloud.storage.BlobInfo blobInfo =
         com.google.cloud.storage.BlobInfo.newBuilder(blobId).build();
 
-    String content = "saga1,nodeA,1698400800000,R\n" + "saga2,nodeA,1698400800000,C";
+    String content = "saga1,nodeA,1698400800000\n" + "saga2,nodeA,1698400800000";
     storage.create(blobInfo, content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
     // Input/Output paths

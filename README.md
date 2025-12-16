@@ -103,7 +103,7 @@ Processes CSV files from GCS, extracts and transforms records, performs deduplic
 **Purpose**: Process DLQ records from GCS files, deduplicate them, partition by node/type/hour, and generate summary statistics.
 
 **Input Formats**:
-1. **Input 1** (required): CSV files with format `sagaIdm,nodeId,dlqTs`
+1. **Input 1** (required): CSV files with format `sagaIdm,nodeId,createTs`
 2. **Input 2** (optional): CSV files with format `sagaIdm,nodeId,createTs,dlqTs`
 
 **Output Formats**:
@@ -159,10 +159,10 @@ sequenceDiagram
             ProcessGroups->>GCS: Open and read file
             GCS-->>ProcessGroups: File content (lines)
             loop For each CSV line
-                ProcessGroups->>ProcessGroups: Parse: sagaIdm,nodeId,dlqTs
-                ProcessGroups->>ProcessGroups: Extract recordHour from dlqTs
+                ProcessGroups->>ProcessGroups: Parse: sagaIdm,nodeId,createTs
+                ProcessGroups->>ProcessGroups: Extract recordHour from createTs
                 ProcessGroups->>ProcessGroups: Create OutputKey(nodeId, "D", recordHour)
-                ProcessGroups->>ProcessGroups: Create KV(key, "sagaIdm,dlqTs")
+                ProcessGroups->>ProcessGroups: Create KV(key, "sagaIdm,createTs")
             end
         end
     end

@@ -203,32 +203,32 @@ public class GcsProcessingPipeline {
                             continue;
                           }
 
-                          // CSV: sagaIdm, nodeId, dlqTs
+                          // CSV: sagaIdm, nodeId, createTs
                           String[] parts = line.split(",");
                           if (parts.length < 3) {
-                            LOG.warn("Skipping malformed line (missing dlqTs): " + line);
+                            LOG.warn("Skipping malformed line (missing createTs): " + line);
                             continue;
                           }
 
                           String sagaIdm = parts[0].trim();
                           String nodeId = parts[1].trim();
-                          String dlqTs = parts[2].trim();
+                          String createTs = parts[2].trim();
 
                           String recordHour = "unknown";
                           try {
-                            long epochMillis = Long.parseLong(dlqTs);
+                            long epochMillis = Long.parseLong(createTs);
                             Instant instant = Instant.ofEpochMilli(epochMillis);
                             DateTimeFormatter formatter =
                                 DateTimeFormatter.ofPattern("yyyy-MM-dd-HH")
                                     .withZone(ZoneId.of("UTC"));
                             recordHour = formatter.format(instant);
                           } catch (NumberFormatException e) {
-                            LOG.warn("Could not parse dlqTs as long: " + dlqTs);
+                            LOG.warn("Could not parse createTs as long: " + createTs);
                             recordHour = "invalid_ts";
                           }
 
                           OutputKey key = new OutputKey(nodeId, "D", recordHour);
-                          String value = sagaIdm + "," + dlqTs;
+                          String value = sagaIdm + "," + createTs;
 
                           c.output(KV.of(key, value));
                         }

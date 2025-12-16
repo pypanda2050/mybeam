@@ -17,7 +17,7 @@ public class GcsProcessingPipelineTest {
 
   @Test
   public void testPipeline() throws Exception {
-    // 1. Prepare Input Data (DLQ format: sagaIdm,nodeId,dlqTs)
+    // 1. Prepare Input Data (DLQ format: sagaIdm,nodeId,createTs)
     // Filename should be start_time_in_millis
     // 1698400800000 corresponds to 2023-10-27T10:00:00Z
     File inputFile1 = tmpFolder.newFile("1698400800000.csv");
@@ -88,7 +88,7 @@ public class GcsProcessingPipelineTest {
 
   @Test
   public void testPipelineDeduplication() throws Exception {
-    // 1. Prepare Input Data with Duplicates (DLQ format)
+    // 1. Prepare Input Data with Duplicates (DLQ format: sagaIdm,nodeId,createTs)
     File inputFile = tmpFolder.newFile("1698400800000_dedup.csv");
     List<String> lines =
         Arrays.asList(

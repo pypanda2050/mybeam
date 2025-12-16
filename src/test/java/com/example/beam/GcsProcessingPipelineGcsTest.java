@@ -36,7 +36,7 @@ public class GcsProcessingPipelineGcsTest {
       Path path = fs.getPath(filename);
 
       List<String> lines =
-          Arrays.asList("saga1,nodeA,1698400800000,R", "saga2,nodeA,1698400800000,C");
+          Arrays.asList("saga1,nodeA,1698400800000", "saga2,nodeA,1698400800000");
       String content = String.join("\n", lines);
 
       Files.write(path, content.getBytes(StandardCharsets.UTF_8));
