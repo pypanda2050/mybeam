@@ -4,9 +4,10 @@ This project contains two Apache Beam pipelines for processing data from various
 
 ## Overview
 
-The project includes:
-1. **GcsProcessingPipeline** - Processes CSV files from GCS, performs deduplication, and generates summary statistics
-2. **PostgresToGcsPipeline** - Extracts data from PostgreSQL and writes to GCS
+The project includes two interconnected Apache Beam pipelines:
+
+1. **PostgresToGcsPipeline** - Extracts data from PostgreSQL and writes to GCS. The output of this pipeline serves as Input 2 for the GcsProcessingPipeline.
+2. **GcsProcessingPipeline** - Processes CSV files from GCS (two inputs), performs deduplication, and generates summary statistics. Input 1 comes from external GCS sources, while Input 2 comes from the PostgresToGcsPipeline output.
 
 ## Architecture
 
@@ -17,7 +18,6 @@ graph TB
     subgraph "Data Sources"
         PG[(PostgreSQL<br/>dlq_job table)]
         GCS1[GCS Input 1<br/>CSV Files]
-        GCS2[GCS Input 2<br/>CSV Files<br/>Optional]
     end
     
     subgraph "Pipeline 1: PostgresToGcsPipeline"
@@ -29,15 +29,14 @@ graph TB
     subgraph "Pipeline 2: GcsProcessingPipeline"
         P2[GcsProcessingPipeline]
         GCS1 -->|Reads CSV files| P2
-        GCS2 -.->|Optional second input| P2
+        GCS_OUT1 -->|Reads as Input 2| P2
         P2 -->|Writes partitioned output| GCS_OUT2[GCS Output<br/>nodeId_recordType_hour/]
         P2 -->|Writes summary| GCS_SUMMARY[GCS Summary<br/>summary_count/]
     end
     
     style PG fill:#e1f5ff
     style GCS1 fill:#e1f5ff
-    style GCS2 fill:#e1f5ff
-    style GCS_OUT1 fill:#c8e6c9
+    style GCS_OUT1 fill:#fff9c4
     style GCS_OUT2 fill:#c8e6c9
     style GCS_SUMMARY fill:#c8e6c9
 ```
@@ -48,7 +47,7 @@ graph TB
 
 Extracts data from a PostgreSQL database table (`dlq_job`) for records from the last hour and writes them to GCS partitioned by hour.
 
-**Purpose**: Export recent DLQ (Dead Letter Queue) job records from PostgreSQL to GCS for further processing.
+**Purpose**: Export recent DLQ (Dead Letter Queue) job records from PostgreSQL to GCS. The output of this pipeline serves as Input 2 for the GcsProcessingPipeline.
 
 **Input Format**:
 - Source: PostgreSQL `dlq_job` table
@@ -103,8 +102,8 @@ Processes CSV files from GCS, extracts and transforms records, performs deduplic
 **Purpose**: Process DLQ records from GCS files, deduplicate them, partition by node/type/hour, and generate summary statistics.
 
 **Input Formats**:
-1. **Input 1** (required): CSV files with format `sagaIdm,nodeId,createTs`
-2. **Input 2** (optional): CSV files with format `sagaIdm,nodeId,createTs,dlqTs`
+1. **Input 1** (required): CSV files with format `sagaIdm,nodeId,createTs` - external GCS source
+2. **Input 2** (optional): CSV files with format `sagaIdm,nodeId,createTs,dlqTs` - output from PostgresToGcsPipeline (dlq/ directory)
 
 **Output Formats**:
 1. **Main Output**: Partitioned CSV files with naming pattern `{nodeId}_{recordType}_{hour}/part-*.csv`
