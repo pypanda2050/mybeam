@@ -16,8 +16,10 @@ import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation.Required;
+import org.apache.beam.sdk.transforms.Filter;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
@@ -43,7 +45,7 @@ public class CassandraCustomReader {
 
     void setCassandraKeyspace(String value);
 
-    @Description("Cassandra table — also used as the token-range split target when withQuery is set")
+    @Description("Cassandra table — used for connection and as the token-range split target")
     @Required
     String getCassandraTable();
 
@@ -51,14 +53,14 @@ public class CassandraCustomReader {
 
     @Description(
         "Inclusive lower bound for dlq_ts (epoch millis). "
-            + "When set, a WHERE dlq_ts >= <value> predicate is added to the read query.")
+            + "Records with dlq_ts < this value are dropped in a Beam Filter step after the read.")
     Long getDlqTsFrom();
 
     void setDlqTsFrom(Long value);
 
     @Description(
         "Inclusive upper bound for dlq_ts (epoch millis). "
-            + "When set, a WHERE dlq_ts <= <value> predicate is added to the read query.")
+            + "Records with dlq_ts > this value are dropped in a Beam Filter step after the read.")
     Long getDlqTsTo();
 
     void setDlqTsTo(Long value);
@@ -81,30 +83,56 @@ public class CassandraCustomReader {
   }
 
   /**
-   * Wraps {@link CassandraIO.Read} and builds a time-range CQL from
-   * {@link CassandraOptions#getDlqTsFrom()} / {@link CassandraOptions#getDlqTsTo()},
-   * so the window can be set at launch time via --dlqTsFrom / --dlqTsTo without recompiling.
+   * Reads from Cassandra with full token-range parallel splitting and applies an optional
+   * Beam-level post-read filter.
    *
-   * <p>When neither bound is provided, CassandraIO falls back to its default
-   * {@code SELECT * FROM keyspace.table} full-table scan.
+   * <h3>Why no {@code withQuery()} for time-range filtering</h3>
    *
-   * <p>Note: filtering on {@code dlq_ts} requires either a secondary index on that column or
-   * {@code ALLOW FILTERING}. The generated query appends {@code ALLOW FILTERING} automatically;
-   * add a secondary index in production to avoid full-partition scans.
+   * <p>CassandraIO's {@code ReadFn.buildInitialQuery} appends token-range predicates
+   * ({@code AND (token(pk) >= ?) AND (token(pk) < ?)}) directly to whatever string is passed via
+   * {@code withQuery()}. If that string ends with {@code ALLOW FILTERING}, the result is:
+   *
+   * <pre>
+   *   ... WHERE dlq_ts >= X AND dlq_ts <= Y ALLOW FILTERING AND (token(pk) >= ?) ...
+   * </pre>
+   *
+   * <p>which is invalid CQL. Omitting {@code withQuery()} lets CassandraIO use its default
+   * {@code SELECT * FROM keyspace.table WHERE (token(pk) >= ?) AND (token(pk) < ?)} path,
+   * preserving correct token-range splitting. The time-range predicate is then applied as a
+   * {@link Filter#by} step in Beam, which runs on every worker after each Cassandra split is read.
+   *
+   * <p>If pushing the filter into Cassandra is required for performance, add a secondary index on
+   * {@code dlq_ts} and pass a pre-built CQL string (without {@code ALLOW FILTERING}) via a
+   * separate {@code withQuery()} call — but be aware that CassandraIO still appends token
+   * predicates, so the query must not contain {@code ALLOW FILTERING}.
    */
   public static class CassandraRead<T> extends PTransform<PBegin, PCollection<T>> {
 
     private final CassandraIO.Read<T> delegate;
+    private final SerializableFunction<T, Boolean> postFilter;
 
-    private CassandraRead(CassandraIO.Read<T> delegate) {
+    private CassandraRead(
+        CassandraIO.Read<T> delegate, SerializableFunction<T, Boolean> postFilter) {
       this.delegate = delegate;
+      this.postFilter = postFilter;
     }
 
+    /**
+     * Builds a {@code CassandraRead} from pipeline options.
+     *
+     * @param postFilter optional Beam-level predicate applied after reading; pass {@code null} to
+     *     read all rows
+     */
     public static <T> CassandraRead<T> fromOptions(
-        CassandraOptions options, Class<T> entityClass, Coder<T> coder) {
+        CassandraOptions options,
+        Class<T> entityClass,
+        Coder<T> coder,
+        SerializableFunction<T, Boolean> postFilter) {
 
       List<String> hosts = Arrays.asList(options.getCassandraHosts().trim().split("\\s*,\\s*"));
 
+      // withTable() (no withQuery()) is intentional: it lets CassandraIO use its default
+      // token-range split strategy, distributing work evenly across the Cassandra ring.
       CassandraIO.Read<T> read =
           CassandraIO.<T>read()
               .withHosts(hosts)
@@ -114,48 +142,21 @@ public class CassandraCustomReader {
               .withEntity(entityClass)
               .withCoder(coder);
 
-      String cql = buildTimeRangeCql(options);
-      if (cql != null) {
-        read = read.withQuery(cql);
-      }
-
       String username = options.getCassandraUsername();
       if (username != null && !username.isEmpty()) {
         read = read.withUsername(username).withPassword(options.getCassandraPassword());
       }
 
-      return new CassandraRead<>(read);
-    }
-
-    /**
-     * Builds a time-range SELECT from --dlqTsFrom / --dlqTsTo.
-     * Long values are safe to inline directly; no injection risk from numeric literals.
-     * Returns null when neither bound is set so the caller can skip withQuery entirely.
-     */
-    private static String buildTimeRangeCql(CassandraOptions options) {
-      Long from = options.getDlqTsFrom();
-      Long to = options.getDlqTsTo();
-
-      if (from == null && to == null) {
-        return null;
-      }
-
-      String base =
-          String.format(
-              "SELECT * FROM %s.%s WHERE", options.getCassandraKeyspace(), options.getCassandraTable());
-
-      if (from != null && to != null) {
-        return String.format("%s dlq_ts >= %d AND dlq_ts <= %d ALLOW FILTERING", base, from, to);
-      } else if (from != null) {
-        return String.format("%s dlq_ts >= %d ALLOW FILTERING", base, from);
-      } else {
-        return String.format("%s dlq_ts <= %d ALLOW FILTERING", base, to);
-      }
+      return new CassandraRead<>(read, postFilter);
     }
 
     @Override
     public PCollection<T> expand(PBegin input) {
-      return input.apply("ReadFromCassandra", delegate);
+      PCollection<T> records = input.apply("ReadFromCassandra", delegate);
+      if (postFilter != null) {
+        return records.apply("FilterByTimeRange", Filter.by(postFilter));
+      }
+      return records;
     }
   }
 
@@ -183,7 +184,20 @@ public class CassandraCustomReader {
 
     Pipeline p = Pipeline.create(options);
 
-    p.apply(CassandraRead.fromOptions(options, DlqJob.class, SerializableCoder.of(DlqJob.class)))
+    // Capture as finals so they can be referenced in the serializable lambda below.
+    final Long from = options.getDlqTsFrom();
+    final Long to = options.getDlqTsTo();
+
+    // Build a Beam-level predicate only when at least one bound is set.
+    // Both Long values are serializable, so the lambda serialises cleanly across workers.
+    SerializableFunction<DlqJob, Boolean> timeFilter =
+        (from != null || to != null)
+            ? job -> (from == null || job.dlqTs >= from) && (to == null || job.dlqTs <= to)
+            : null;
+
+    p.apply(
+            CassandraRead.fromOptions(
+                options, DlqJob.class, SerializableCoder.of(DlqJob.class), timeFilter))
         .apply(
             "FormatCsv",
             MapElements.via(
