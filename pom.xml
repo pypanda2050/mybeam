@@ -85,6 +85,13 @@
             <version>2.2.224</version>
             <scope>test</scope>
         </dependency>
+
+        <!-- Cassandra IO -->
+        <dependency>
+            <groupId>org.apache.beam</groupId>
+            <artifactId>beam-sdks-java-io-cassandra</artifactId>
+            <version>${beam.version}</version>
+        </dependency>
     </dependencies>
 
     <build>
