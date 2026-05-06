@@ -50,12 +50,18 @@ public class CassandraCustomReader {
     void setCassandraTable(String value);
 
     @Description(
-        "Full CQL SELECT to run instead of the default 'SELECT * FROM keyspace.table'. "
-            + "Must include a complete SELECT … FROM … statement; token-range predicates are "
-            + "appended automatically by CassandraIO for parallel reads.")
-    String getCassandraCql();
+        "Inclusive lower bound for dlq_ts (epoch millis). "
+            + "When set, a WHERE dlq_ts >= <value> predicate is added to the read query.")
+    Long getDlqTsFrom();
 
-    void setCassandraCql(String value);
+    void setDlqTsFrom(Long value);
+
+    @Description(
+        "Inclusive upper bound for dlq_ts (epoch millis). "
+            + "When set, a WHERE dlq_ts <= <value> predicate is added to the read query.")
+    Long getDlqTsTo();
+
+    void setDlqTsTo(Long value);
 
     @Description("Cassandra username (leave blank for no auth)")
     String getCassandraUsername();
@@ -75,11 +81,16 @@ public class CassandraCustomReader {
   }
 
   /**
-   * Wraps {@link CassandraIO.Read} and injects the CQL from {@link CassandraOptions#getCassandraCql()},
-   * so the query can be overridden at launch time via --cassandraCql without recompiling.
+   * Wraps {@link CassandraIO.Read} and builds a time-range CQL from
+   * {@link CassandraOptions#getDlqTsFrom()} / {@link CassandraOptions#getDlqTsTo()},
+   * so the window can be set at launch time via --dlqTsFrom / --dlqTsTo without recompiling.
    *
-   * <p>When {@code cassandraCql} is blank, CassandraIO falls back to its default
-   * {@code SELECT * FROM keyspace.table} scan.
+   * <p>When neither bound is provided, CassandraIO falls back to its default
+   * {@code SELECT * FROM keyspace.table} full-table scan.
+   *
+   * <p>Note: filtering on {@code dlq_ts} requires either a secondary index on that column or
+   * {@code ALLOW FILTERING}. The generated query appends {@code ALLOW FILTERING} automatically;
+   * add a secondary index in production to avoid full-partition scans.
    */
   public static class CassandraRead<T> extends PTransform<PBegin, PCollection<T>> {
 
@@ -103,8 +114,8 @@ public class CassandraCustomReader {
               .withEntity(entityClass)
               .withCoder(coder);
 
-      String cql = options.getCassandraCql();
-      if (cql != null && !cql.trim().isEmpty()) {
+      String cql = buildTimeRangeCql(options);
+      if (cql != null) {
         read = read.withQuery(cql);
       }
 
@@ -114,6 +125,32 @@ public class CassandraCustomReader {
       }
 
       return new CassandraRead<>(read);
+    }
+
+    /**
+     * Builds a time-range SELECT from --dlqTsFrom / --dlqTsTo.
+     * Long values are safe to inline directly; no injection risk from numeric literals.
+     * Returns null when neither bound is set so the caller can skip withQuery entirely.
+     */
+    private static String buildTimeRangeCql(CassandraOptions options) {
+      Long from = options.getDlqTsFrom();
+      Long to = options.getDlqTsTo();
+
+      if (from == null && to == null) {
+        return null;
+      }
+
+      String base =
+          String.format(
+              "SELECT * FROM %s.%s WHERE", options.getCassandraKeyspace(), options.getCassandraTable());
+
+      if (from != null && to != null) {
+        return String.format("%s dlq_ts >= %d AND dlq_ts <= %d ALLOW FILTERING", base, from, to);
+      } else if (from != null) {
+        return String.format("%s dlq_ts >= %d ALLOW FILTERING", base, from);
+      } else {
+        return String.format("%s dlq_ts <= %d ALLOW FILTERING", base, to);
+      }
     }
 
     @Override
