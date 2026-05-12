@@ -75,6 +75,15 @@ public class CassandraCustomReader {
 
     void setCassandraPassword(String value);
 
+    @Description(
+        "Minimum number of Cassandra token-range splits for CassandraReaderWithFilteringQuery. "
+            + "0 (default) = one split per vnode. Increase to raise parallelism beyond the "
+            + "vnode count, e.g. '--cassandraMinSplits=200' on a 3-node cluster with 256 vnodes.")
+    @Default.Integer(0)
+    Integer getCassandraMinSplits();
+
+    void setCassandraMinSplits(Integer value);
+
     @Description("Output GCS path prefix")
     @Required
     String getOutput();
