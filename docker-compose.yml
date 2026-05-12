@@ -20,3 +20,28 @@ services:
       POSTGRES_DB: testdb
     ports:
       - "5432:5432"
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra-test
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: test-cluster
+      CASSANDRA_DC: datacenter1
+      HEAP_NEWSIZE: 128M
+      MAX_HEAP_SIZE: 512M
+    # Uncomment enable_sasi_indexes before the normal entrypoint starts Cassandra.
+    # SASI indexes support range queries (>=, <=) on non-primary-key columns, which
+    # is required for the CustomCassandraReaderWithFilteringCQL integration tests.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sed -i 's/sasi_indexes_enabled: false/sasi_indexes_enabled: true/' /etc/cassandra/cassandra.yaml
+        exec docker-entrypoint.sh cassandra -f
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
